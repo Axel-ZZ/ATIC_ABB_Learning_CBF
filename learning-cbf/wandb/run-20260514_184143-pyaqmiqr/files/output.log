@@ -1,0 +1,12 @@
+ep   20 | loss 0.1079 (safe 0.0683, unsafe 0.0397) | acc safe 0.610 unsafe 0.985
+ep   40 | loss 0.0635 (safe 0.0491, unsafe 0.0145) | acc safe 0.853 unsafe 0.985
+ep   60 | loss 0.0362 (safe 0.0299, unsafe 0.0063) | acc safe 0.887 unsafe 1.000
+ep   80 | loss 0.0259 (safe 0.0228, unsafe 0.0031) | acc safe 0.914 unsafe 1.000
+ep  100 | loss 0.0218 (safe 0.0182, unsafe 0.0036) | acc safe 0.924 unsafe 0.998
+ep  120 | loss 0.0186 (safe 0.0152, unsafe 0.0034) | acc safe 0.931 unsafe 0.999
+ep  140 | loss 0.0163 (safe 0.0139, unsafe 0.0024) | acc safe 0.931 unsafe 0.999
+ep  160 | loss 0.0164 (safe 0.0140, unsafe 0.0024) | acc safe 0.927 unsafe 1.000
+ep  180 | loss 0.0150 (safe 0.0129, unsafe 0.0021) | acc safe 0.930 unsafe 1.000
+ep  200 | loss 0.0157 (safe 0.0150, unsafe 0.0008) | acc safe 0.937 unsafe 0.999
+[34m[1mwandb[0m: [33mWARNING[0m Saving files without folders. If you want to preserve subdirectories pass base_path to wandb.save, i.e. wandb.save("/mnt/folder/file.h5", base_path="/mnt")
+[34m[1mwandb[0m: [33mWARNING[0m Symlinked 1 file into the W&B run directory; call wandb.save again to sync new files.

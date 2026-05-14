@@ -1,0 +1,28 @@
+{
+  "os": "Linux-6.17.0-22-generic-x86_64-with-glibc2.39",
+  "python": "CPython 3.13.12",
+  "startedAt": "2026-05-14T16:41:43.973892Z",
+  "program": "/home/bb/Desktop/eth-v26/ATIC_ABB_Learning_CBF/learning-cbf/train.py",
+  "codePath": "learning-cbf/train.py",
+  "codePathLocal": "train.py",
+  "git": {
+    "remote": "git@github.com:Axel-ZZ/ATIC_ABB_Learning_CBF.git",
+    "commit": "78b488a441c804c1bd93cbce9d7019346c0a6952"
+  },
+  "email": "balinbb@stud.ntnu.no",
+  "root": "/home/bb/Desktop/eth-v26/ATIC_ABB_Learning_CBF/learning-cbf",
+  "host": "bb-Yoga-Pro-7-14ASP10",
+  "executable": "/home/bb/Desktop/eth-v26/ATIC_ABB_Learning_CBF/.venv/bin/python3",
+  "cpu_count": 10,
+  "cpu_count_logical": 20,
+  "disk": {
+    "/": {
+      "total": "308494532608",
+      "used": "245366345728"
+    }
+  },
+  "memory": {
+    "total": "32893771776"
+  },
+  "writerId": "ekcpbh421el6us2c7mpt8km6kf16arak"
+}
