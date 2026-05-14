@@ -17,15 +17,16 @@ uv sync
 ## Running
 
 ```bash
-uv run python planner.py
-uv run python model.py
+uv run python expert_data_generation/planner.py
+uv run python expert_data_generation/model.py
+uv run python learning-cbf/train.py
 ```
 
 Or activate the venv directly:
 
 ```bash
 source .venv/bin/activate
-python planner.py
+python expert_data_generation/planner.py
 ```
 
 ## Dependencies

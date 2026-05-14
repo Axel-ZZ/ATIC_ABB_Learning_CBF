@@ -1,1 +1,21 @@
-__pycache__
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual envs
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ML artifacts
+wandb/
+**/checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# OS / editor
+.DS_Store
