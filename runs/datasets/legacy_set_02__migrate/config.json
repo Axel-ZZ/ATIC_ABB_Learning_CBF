@@ -1,0 +1,8 @@
+{
+  "_legacy_migration": true,
+  "_note": "Mirrored from learning-cbf/generated-sets/set_02 for new pipeline.",
+  "sigma": 0.10,
+  "deep_target": 3000,
+  "deep_margin": 1.5,
+  "obstacle": {"x": 2.0, "y": 2.0, "radius": 0.5}
+}

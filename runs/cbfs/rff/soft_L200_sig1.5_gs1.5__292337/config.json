@@ -1,0 +1,18 @@
+{
+  "method": "rff",
+  "dataset_tag": "legacy_set_02__migrate",
+  "mode": "soft",
+  "n_features": 200,
+  "sigma": 1.5,
+  "seed": 42,
+  "gamma_safe": 1.5,
+  "gamma_unsafe": 1.5,
+  "gamma_dyn": 0.05,
+  "lam_safe": 10.0,
+  "lam_unsafe": 100.0,
+  "lam_dyn": 20.0,
+  "lam_param": 0.5,
+  "solver": "CLARABEL",
+  "_git_sha": "9495558",
+  "_saved_at": "2026-05-19T10:51:53"
+}

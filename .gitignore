@@ -16,6 +16,11 @@ wandb/
 *.pt
 *.pth
 *.ckpt
+# *.csv
+# *.npz
+# *.json
+# *.png
 
 # OS / editor
 .DS_Store
+

@@ -1,0 +1,8 @@
+{
+  "status": "optimal",
+  "runtime_s": 504.5481492350227,
+  "theta_norm": 158.5435926810651,
+  "safe_slack_min": -2.1605982337187273,
+  "unsafe_slack_min": -0.36174106867786326,
+  "dyn_slack_min": -4.493432761086139
+}

@@ -500,83 +500,117 @@ def export_csv(trajs: List[Trajectory], path: str) -> int:
 
 # ── Demo ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    import sys
+    from pathlib import Path as _Path
+    sys.path.append(str(_Path(__file__).resolve().parent.parent))
+    import pipeline_io as pio
+
     robot = RobotModel(wheel_radius=0.05, wheel_base=0.3)
     kin = DiffDriveKinematics(robot)
 
-    obstacle = CircleObstacle(2.0, 2.0, 0.5)
-    start = np.array([0.0, 0.0, 0.0])
-    goal_center = np.array([4.0, 4.0, np.pi / 2])
+    # All tunables collected into one dict → hashed into the run tag.
+    CFG = dict(
+        obstacle=dict(x=2.0, y=2.0, radius=0.5),
+        start=[0.0, 0.0, 0.0],
+        goal_center=[4.0, 4.0, float(np.pi / 2)],
+        goal_sweep=dict(half_len=0.30, n=5),
+        N_steps=160, dt=0.1,
+        v_bounds=[-0.2, 0.5], omega_bounds=[-2.0, 2.0],
+        grid=dict(nx=12, ny=12, bbox_margin=0.7, min_clearance=0.05,
+                  clearance=0.015, w_effort=1.0, w_smooth=25.0,
+                  dedup_thresh=0.05),
+        polar=dict(n_angles=24, radius_offsets=[0.05, 0.14, 0.30],
+                   clearances=[0.015], cost_grid=[[1.0, 25.0]],
+                   hug_strengths=[2.0, 6.0], arc_spans_deg=[20.0, 40.0],
+                   dedup_thresh=0.05),
+        smoothness=dict(max_length_factor=2.5, max_jerk=0.6, max_curv=0.01),
+        time_budget_s=600.0,
+    )
+    human = (f"N{CFG['N_steps']}_dt{CFG['dt']:.2f}_"
+             f"obs{CFG['obstacle']['x']:.0f}-{CFG['obstacle']['y']:.0f}-{CFG['obstacle']['radius']}")
+    TAG = pio.make_tag(human, CFG)
+    OUT = pio.run_dir(pio.STAGE_TRAJ, TAG)
+    print(f"[stage 1] tag = {TAG}\n          out = {OUT}")
 
-    # ── Wall-clock budget. On timeout, partial results are saved/plotted. ──
-    TIME_BUDGET_S = 600.0
-    deadline = time.monotonic() + TIME_BUDGET_S
+    obstacle = CircleObstacle(**CFG["obstacle"])
+    start = np.array(CFG["start"])
+    goal_center = np.array(CFG["goal_center"])
+
+    TIME_BUDGET_S = CFG["time_budget_s"]
+    t_start = time.monotonic()
+    deadline = t_start + TIME_BUDGET_S
     print(f"Wall-clock budget: {TIME_BUDGET_S:.0f}s")
 
-    # ── Goal sweep: offsets along a short line perpendicular to start→goal ──
-    # Diversifies which side of the obstacle the optimum favors.
+    # ── Goal sweep ────────────────────────────────────────────────────
     se = goal_center[:2] - start[:2]
     n_perp = np.array([-se[1], se[0]]) / (np.linalg.norm(se) + 1e-9)
-    GOAL_LINE_HALF_LEN = 0.30                   # ±0.30 m along the perpendicular
-    GOAL_N            = 5                       # 5 goal positions
-    lambdas           = np.linspace(-GOAL_LINE_HALF_LEN, GOAL_LINE_HALF_LEN, GOAL_N)
+    GOAL_LINE_HALF_LEN = CFG["goal_sweep"]["half_len"]
+    GOAL_N             = CFG["goal_sweep"]["n"]
+    lambdas = np.linspace(-GOAL_LINE_HALF_LEN, GOAL_LINE_HALF_LEN, GOAL_N)
     goals = [np.array([goal_center[0] + lam * n_perp[0],
                        goal_center[1] + lam * n_perp[1],
                        goal_center[2]]) for lam in lambdas]
-    print(f"Sweeping {GOAL_N} goals along ±{GOAL_LINE_HALF_LEN} m perpendicular to start→goal.")
 
     trajs: List[Trajectory] = []
+    g_cfg, p_cfg, s_cfg = CFG["grid"], CFG["polar"], CFG["smoothness"]
     for gi, goal in enumerate(goals):
         if time.monotonic() > deadline:
-            print(f"⏱  Deadline reached before goal {gi+1}/{GOAL_N} — stopping sweep.")
+            print(f"⏱  Deadline reached before goal {gi+1}/{GOAL_N}")
             break
         print(f"\n── Goal {gi+1}/{GOAL_N}: ({goal[0]:.2f}, {goal[1]:.2f}) ──")
-
-        print("Generating streamline grid (fills space) ...")
         trajs_grid = generate_grid_set(
             kin, start, goal, obstacle,
-            grid_nx=12, grid_ny=12,             # smaller per goal — budget shared across 5
-            bbox_margin=0.7, grid_min_clearance=0.05,
-            clearance=0.015, w_effort=1.0, w_smooth=25.0,
-            N_steps=160, dt=0.1,
-            v_bounds=(-0.2, 0.5), omega_bounds=(-2.0, 2.0),
-            dedup_thresh=0.05, max_length_factor=2.5,
-            max_jerk=0.6, max_curv=0.01,
+            grid_nx=g_cfg["nx"], grid_ny=g_cfg["ny"],
+            bbox_margin=g_cfg["bbox_margin"],
+            grid_min_clearance=g_cfg["min_clearance"],
+            clearance=g_cfg["clearance"],
+            w_effort=g_cfg["w_effort"], w_smooth=g_cfg["w_smooth"],
+            N_steps=CFG["N_steps"], dt=CFG["dt"],
+            v_bounds=tuple(CFG["v_bounds"]), omega_bounds=tuple(CFG["omega_bounds"]),
+            dedup_thresh=g_cfg["dedup_thresh"],
+            max_length_factor=s_cfg["max_length_factor"],
+            max_jerk=s_cfg["max_jerk"], max_curv=s_cfg["max_curv"],
             deadline=deadline,
         )
-        print("Generating wall-hugging polar set (follows curvature) ...")
         trajs_hug = generate_dense_set(
             kin, start, goal, obstacle,
-            n_angles=24,                        # 15° resolution per goal
-            radius_offsets=(0.05, 0.14, 0.30),  # 3 bands: tight, mid, wide
-            clearances=(0.015,),
-            cost_grid=((1.0, 25.0),),
-            hug_strengths=(2.0, 6.0),
-            arc_spans_deg=(20.0, 40.0),
-            N_steps=160, dt=0.1,
-            v_bounds=(-0.2, 0.5), omega_bounds=(-2.0, 2.0),
-            dedup_thresh=0.05, max_length_factor=2.5,
-            max_jerk=0.6, max_curv=0.01,
+            n_angles=p_cfg["n_angles"],
+            radius_offsets=tuple(p_cfg["radius_offsets"]),
+            clearances=tuple(p_cfg["clearances"]),
+            cost_grid=tuple(tuple(c) for c in p_cfg["cost_grid"]),
+            hug_strengths=tuple(p_cfg["hug_strengths"]),
+            arc_spans_deg=tuple(p_cfg["arc_spans_deg"]),
+            N_steps=CFG["N_steps"], dt=CFG["dt"],
+            v_bounds=tuple(CFG["v_bounds"]), omega_bounds=tuple(CFG["omega_bounds"]),
+            dedup_thresh=p_cfg["dedup_thresh"],
+            max_length_factor=s_cfg["max_length_factor"],
+            max_jerk=s_cfg["max_jerk"], max_curv=s_cfg["max_curv"],
             deadline=deadline,
         )
-        trajs.extend(trajs_grid)
-        trajs.extend(trajs_hug)
-        print(f"  Goal {gi+1}: grid={len(trajs_grid)}  hug={len(trajs_hug)}  running total={len(trajs)}")
+        trajs.extend(trajs_grid); trajs.extend(trajs_hug)
+        print(f"  Goal {gi+1}: grid={len(trajs_grid)}  hug={len(trajs_hug)}  total={len(trajs)}")
 
-    # Use the central goal for plotting reference.
-    goal = goal_center
-    print(f"\n{len(trajs)} unique trajectories generated across {GOAL_N} goals.")
+    # ── Outputs ────────────────────────────────────────────────────────
+    out_csv = OUT / "trajectories.csv"
+    n_rows = export_csv(trajs, str(out_csv))
+    print(f"\nWrote {n_rows} rows to {out_csv}")
 
-    out_csv = "/home/bb/Desktop/atic-cbfs/results/dense_trajectories.csv"
-    n_rows = export_csv(trajs, out_csv)
-    print(f"Wrote {n_rows} (state, action) rows to {out_csv}")
+    runtime_s = time.monotonic() - t_start
+    pio.save_config(OUT, CFG)
+    pio.save_meta(OUT, dict(n_trajectories=len(trajs), n_rows=n_rows,
+                            n_goals_used=len(goals), runtime_s=runtime_s))
+    pio.append_index_row(pio.STAGE_TRAJ, dict(
+        tag=TAG, n_trajectories=len(trajs), n_rows=n_rows,
+        N_steps=CFG["N_steps"], dt=CFG["dt"],
+        obstacle=f"{CFG['obstacle']['x']},{CFG['obstacle']['y']},{CFG['obstacle']['radius']}",
+        runtime_s=f"{runtime_s:.1f}", path=str(OUT),
+    ))
 
-    # Plot
     try:
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots(figsize=(9, 9))
         ax.add_patch(plt.Circle((obstacle.x, obstacle.y), obstacle.radius,
                                 color="tab:red", alpha=0.5, zorder=5))
-        # Show all trajectories with alpha for density visualization
         for t in trajs:
             ax.plot(t.states[:, 0], t.states[:, 1], "-",
                     color="tab:blue", alpha=0.25, linewidth=0.9)
@@ -584,11 +618,10 @@ if __name__ == "__main__":
         gxy = np.array([g[:2] for g in goals])
         ax.plot(gxy[:, 0], gxy[:, 1], "r*", markersize=14, label="goals", zorder=10)
         ax.set_aspect("equal")
-        ax.set_title(f"{len(trajs)} dense expert trajectories — {GOAL_N}-goal sweep")
-        ax.grid(alpha=0.3)
-        ax.legend()
+        ax.set_title(f"{len(trajs)} dense expert trajectories — {TAG}")
+        ax.grid(alpha=0.3); ax.legend()
         plt.tight_layout()
-        plt.savefig("/home/bb/Desktop/atic-cbfs/results/dense_trajectories.png", dpi=110)
-        print("Saved /results/dense_trajectories.png")
+        plt.savefig(OUT / "preview.png", dpi=110)
+        print(f"Saved {OUT / 'preview.png'}")
     except Exception as e:
         print(f"(plot skipped: {e})")

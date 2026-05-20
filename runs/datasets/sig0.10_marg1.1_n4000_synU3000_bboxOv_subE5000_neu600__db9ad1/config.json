@@ -1,0 +1,19 @@
+{
+  "traj_tag": "legacy_set_02_src__src",
+  "sigma": 0.1,
+  "deep_target": 4000,
+  "deep_margin": 1.05,
+  "obstacle": {
+    "x": 2.0,
+    "y": 2.0,
+    "radius": 0.5
+  },
+  "synth_unsafe_n": 3000,
+  "bbox_override": "-0.5,5.0,-1.0,5.0",
+  "subsample_expert": 5000,
+  "subsample_bins": "40,40,8",
+  "neutral_shell_n": 600,
+  "neutral_shell_width": 0.6,
+  "_git_sha": "9495558",
+  "_saved_at": "2026-05-19T12:43:43"
+}
