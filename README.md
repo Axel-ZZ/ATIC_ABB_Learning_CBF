@@ -86,8 +86,8 @@ Pre-rendered iteration comparisons sit in `runs/cbfs/comparisons/` (e.g. `iter10
 
 ## Implementation notes
 
-- `docs/rff.md` — paper-to-code map for `optimization_cbf.py` (Robey et al., arXiv:2004.03315). Every line tagged `[PAPER]` / `[NOTEBOOK]` / `[ADDED]`.
-- `docs/kinodynamic_rrt.md` — trajectory-optimizer formulation (decision vars, cost, constraints).
+- `docs/cbf_construction/rff.md` — paper-to-code map for `optimization_cbf.py` (Robey et al., arXiv:2004.03315). Every line tagged `[PAPER]` / `[NOTEBOOK]` / `[ADDED]`.
+- `docs/data_generation/kinodynamic_rrt.md` — trajectory-optimizer formulation (decision vars, cost, constraints).
 - `pipeline_io.py` — shared tag/path/index plumbing. Read first when extending the pipeline.
 
 ## Dependencies
