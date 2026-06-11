@@ -371,7 +371,7 @@ def smooth_path(
 
 # ── Demo ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    from expert_data_generation.model import RobotModel, DiffDriveKinematics
+    from enviroments.dynamics_models import RobotModel, DiffDriveKinematics
 
     robot = RobotModel(wheel_radius=0.05, wheel_base=0.3)
     kin = DiffDriveKinematics(robot)
@@ -429,7 +429,7 @@ if __name__ == "__main__":
         ax.set_title("Kinodynamic RRT + CasADi smoothing")
         ax.grid(alpha=0.3)
         plt.tight_layout()
-        plt.savefig("/home/bb/Desktop/atic-cbfs/results.png", dpi=110)
-        print("Saved /results/rrt_demo.png")
+        plt.savefig("/home/bb/Desktop/atic-cbfs/plots/rrt.png", dpi=110)
+        print("Saved plots")
     except Exception as e:
         print(f"(plot skipped: {e})")
