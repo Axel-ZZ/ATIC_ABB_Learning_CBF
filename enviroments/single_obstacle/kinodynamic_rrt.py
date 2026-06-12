@@ -371,7 +371,7 @@ def smooth_path(
 
 # ── Demo ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    from enviroments.dynamics_models import RobotModel, DiffDriveKinematics
+    from enviroments.vehicle_dynamics import RobotModel, DiffDriveKinematics
 
     robot = RobotModel(wheel_radius=0.05, wheel_base=0.3)
     kin = DiffDriveKinematics(robot)

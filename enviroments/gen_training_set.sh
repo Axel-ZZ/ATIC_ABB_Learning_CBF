@@ -1,0 +1,1 @@
+#TODO python command with all the flags, have one defualt comand which is live and then a couple of examples commented out for running them quick
