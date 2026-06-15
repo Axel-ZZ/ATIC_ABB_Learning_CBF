@@ -17,5 +17,8 @@ wandb/
 *.pth
 *.ckpt
 
+# Generated maze datasets (large; regenerate with maze_env/maze_trajectories.py)
+maze_env/results/
+
 # OS / editor
 .DS_Store

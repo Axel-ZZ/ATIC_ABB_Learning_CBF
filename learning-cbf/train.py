@@ -8,14 +8,18 @@ from pathlib import Path
 from datetime import datetime
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SET_DIR = REPO_ROOT / "learning-cbf/generated-sets/set_01"
+SET_DIR = REPO_ROOT / "learning-cbf/generated-sets/set_02"
 CKPT_ROOT = REPO_ROOT / "learning-cbf/checkpoints"
 
 X_safe_df = pd.read_csv(SET_DIR / "X_safe.csv")
 N_df = pd.read_csv(SET_DIR / "N.csv")
 
-X_safe = torch.tensor(X_safe_df.values, dtype=torch.float32)
-X_unsafe = torch.tensor(N_df.values, dtype=torch.float32)
+# h = h(x, y) only: the robot footprint is circular and the maze is
+# static, so collision geometry depends on position alone. Heading
+# enters later in the QP through grad_h(x) . f(x, u) — not as an input
+# to the network. (theta, v, omega stay in the CSVs for that stage.)
+X_safe = torch.tensor(X_safe_df[["x", "y"]].values, dtype=torch.float32)
+X_unsafe = torch.tensor(N_df[["x", "y"]].values, dtype=torch.float32)
 
 print(f"Columns: {list(X_safe_df.columns)}")
 print(f"X_safe:   {tuple(X_safe.shape)}")
@@ -42,23 +46,38 @@ def cbf_loss(h_safe, h_unsafe, margin=0.1):
 
 
 def save_checkpoint(path, model, opt, epoch, config, acc):
-    torch.save({
+    payload = {
         "epoch": epoch,
         "model_state": model.state_dict(),
         "opt_state": opt.state_dict(),
         "config": config,
         "acc": acc,
-    }, path)
+    }
+    # Write to a temp file and replace: OneDrive intermittently locks
+    # frequently-rewritten files, which makes a direct torch.save crash.
+    import os
+    import time
+    path = Path(path)
+    tmp = path.with_suffix(".tmp")
+    for attempt in range(5):
+        try:
+            torch.save(payload, tmp)
+            os.replace(tmp, path)
+            return
+        except (RuntimeError, OSError):
+            time.sleep(0.5 * (attempt + 1))
+    print(f"WARNING: could not save checkpoint {path} (file locked?)")
 
 
 config = dict(
     in_dim=X_safe.shape[1],
-    hidden=64,
+    hidden=128,
     lr=1e-3,
-    batch_size=512,
-    epochs=200,
+    batch_size=1024,
+    epochs=40000,
+    eval_every=50,     # full-dataset accuracy is expensive — don't do it every step
     margin=0.1,
-    dataset="set_01",
+    dataset="set_02",
 )
 
 run_name = datetime.now().strftime("cbf_%Y%m%d_%H%M%S")
@@ -70,11 +89,15 @@ wandb.init(project="atic-cbf", name=run_name, config=config)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = CBFNet(in_dim=config["in_dim"], hidden=config["hidden"]).to(device)
 opt = torch.optim.Adam(model.parameters(), lr=config["lr"])
+# Anneal the lr to zero over the run — at a fixed 1e-3 the loss plateaus
+# into noise; the decay lets the boundary settle.
+sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=config["epochs"])
 
 X_safe_d = X_safe.to(device)
 X_unsafe_d = X_unsafe.to(device)
 
 best_acc = 0.0
+acc = acc_s = acc_u = 0.0
 for epoch in range(config["epochs"]):
     idx_s = torch.randint(0, X_safe_d.size(0), (config["batch_size"],), device=device)
     idx_u = torch.randint(0, X_unsafe_d.size(0), (config["batch_size"],), device=device)
@@ -86,28 +109,29 @@ for epoch in range(config["epochs"]):
     opt.zero_grad()
     loss.backward()
     opt.step()
+    sched.step()
 
-    with torch.no_grad():
-        acc_s = (model(X_safe_d) > 0).float().mean().item()
-        acc_u = (model(X_unsafe_d) < 0).float().mean().item()
-    acc = 0.5 * (acc_s + acc_u)
-
-    wandb.log({
+    log = {
         "epoch": epoch,
         "loss": loss.item(),
         "loss_safe": ls,
         "loss_unsafe": lu,
-        "acc_safe": acc_s,
-        "acc_unsafe": acc_u,
-        "acc": acc,
-    })
+    }
 
-    if (epoch + 1) % 20 == 0:
-        print(f"ep {epoch+1:4d} | loss {loss.item():.4f} (safe {ls:.4f}, unsafe {lu:.4f}) | acc safe {acc_s:.3f} unsafe {acc_u:.3f}")
+    if (epoch + 1) % config["eval_every"] == 0:
+        with torch.no_grad():
+            acc_s = (model(X_safe_d) > 0).float().mean().item()
+            acc_u = (model(X_unsafe_d) < 0).float().mean().item()
+        acc = 0.5 * (acc_s + acc_u)
+        log.update({"acc_safe": acc_s, "acc_unsafe": acc_u, "acc": acc})
+        if acc > best_acc:
+            best_acc = acc
+            save_checkpoint(ckpt_dir / "best.pt", model, opt, epoch, config, acc)
 
-    if acc > best_acc:
-        best_acc = acc
-        save_checkpoint(ckpt_dir / "best.pt", model, opt, epoch, config, acc)
+    wandb.log(log)
+
+    if (epoch + 1) % 1000 == 0:
+        print(f"ep {epoch+1:5d} | loss {loss.item():.4f} (safe {ls:.4f}, unsafe {lu:.4f}) | acc safe {acc_s:.3f} unsafe {acc_u:.3f} | best {best_acc:.3f}")
 
 save_checkpoint(ckpt_dir / "last.pt", model, opt, config["epochs"] - 1, config, acc)
 wandb.save(str(ckpt_dir / "best.pt"))

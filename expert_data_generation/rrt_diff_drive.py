@@ -52,6 +52,36 @@ class CircleObstacle:
         return dx * dx + dy * dy <= (self.radius + robot_radius) ** 2
 
 
+@dataclass
+class WallObstacle:
+    """
+    Axis-aligned rectangular wall in the (x, y) plane.
+
+    Duck-type compatible with CircleObstacle: RRTPlanner only calls
+    `collides(pt, robot_radius)`, so walls and circles can be mixed
+    freely in the same obstacle list.
+    """
+    xmin: float
+    xmax: float
+    ymin: float
+    ymax: float
+
+    def collides(self, pt: np.ndarray, robot_radius: float = 0.0) -> bool:
+        # Distance from point to the box (0 inside), compared to the
+        # inflation radius — equivalent to inflating the box by a disc.
+        dx = max(self.xmin - pt[0], 0.0, pt[0] - self.xmax)
+        dy = max(self.ymin - pt[1], 0.0, pt[1] - self.ymax)
+        return dx * dx + dy * dy <= robot_radius * robot_radius
+
+    @property
+    def center(self) -> Tuple[float, float]:
+        return 0.5 * (self.xmin + self.xmax), 0.5 * (self.ymin + self.ymax)
+
+    @property
+    def half_extents(self) -> Tuple[float, float]:
+        return 0.5 * (self.xmax - self.xmin), 0.5 * (self.ymax - self.ymin)
+
+
 # ── Tree bookkeeping ────────────────────────────────────────────────────
 @dataclass
 class _Node:
