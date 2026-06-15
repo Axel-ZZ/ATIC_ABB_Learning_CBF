@@ -1,0 +1,8 @@
+{
+  "tag": "single_obstacle_es242643_eu1219_sa10000_un50000__7b0bfd",
+  "n_expert_safe": 242643,
+  "n_expert_unsafe": 1219,
+  "n_safe": 10000,
+  "n_unsafe": 50000,
+  "n_safe_trajectories": 5000
+}
