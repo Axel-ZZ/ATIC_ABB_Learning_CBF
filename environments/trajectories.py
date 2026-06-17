@@ -254,7 +254,8 @@ def generate_sim_set(
     dt: float = 0.1,
     v_bounds: Tuple[float, float] = (-0.2, 0.5),
     omega_bounds: Tuple[float, float] = (-2.0, 2.0),
-    clearance: float = 0.05,
+    clearance: float = 0.02,            # slight wall standoff over the robot radius
+                                        # (planning r_pose just above the collision margin)
     heading_noise: float = np.pi / 2,
     sigma_v: float = 0.02,
     sigma_omega: float = 0.1,

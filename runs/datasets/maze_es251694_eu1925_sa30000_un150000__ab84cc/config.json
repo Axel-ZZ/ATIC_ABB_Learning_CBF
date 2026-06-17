@@ -1,0 +1,12 @@
+{
+  "env": "maze",
+  "n_safe_trajs": 5000,
+  "n_safe": 30000,
+  "n_unsafe": 150000,
+  "deep_margin": 0.1,
+  "nuts_cell": 0.05,
+  "nuts_eta": 0.15,
+  "nuts_boundary_pct": 20,
+  "robot_radius": 0.1,
+  "seed": 0
+}

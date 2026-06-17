@@ -1,0 +1,8 @@
+{
+  "tag": "maze_es251694_eu1925_sa30000_un150000__05f44b",
+  "n_expert_safe": 251694,
+  "n_expert_unsafe": 1925,
+  "n_safe": 30000,
+  "n_unsafe": 150000,
+  "n_safe_trajectories": 5000
+}

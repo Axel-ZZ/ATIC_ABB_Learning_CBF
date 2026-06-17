@@ -7,7 +7,10 @@ trajectories (cached so re-runs are fast) and writes the FOUR sets the CBF
 learners consume to runs/datasets/<tag>/:
 
     expert_safe.csv    x,y,theta,v,omega   safe expert states (Z_dyn / X_safe),
-                                           from the collision-free trajectories.
+                                           from the collision-free trajectories,
+                                           with the NUTS boundary states below
+                                           REMOVED (they go to expert_unsafe), so
+                                           the two expert sets are disjoint.
     expert_unsafe.csv  x,y,theta,v,omega   SAMPLING unsafe set (X_N): the
                                            reverse-kNN boundary of the expert
                                            demonstrations (Lindemann et al.,
@@ -42,25 +45,26 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from environments.environment import (ENV_NAMES, build_env,
-                                       nearest_obstacle_distance, plot_environment)
+                                       nearest_obstacle_distance)
 from environments.vehicle_dynamics import RobotModel, DiffDriveKinematics
 from environments.trajectories import generate_sim_set, export_csv
+from environments.dataset_plot import preview_dataset
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # =========================== CONFIG ===========================
 ENV              = "single_obstacle"   # "single_obstacle" or "maze"
-N_SAFE_TRAJS     = 5000                 # safe (collision-free) expert trajectories
+N_SAFE_TRAJS     = 5000                # safe (collision-free) expert trajectories
 N_SAFE_SAMPLES   = 10000               # sampled safe points (clearance ≥ deep_margin)
 N_UNSAFE_SAMPLES = 50000               # sampled unsafe points (fill S^c)
-DEEP_MARGIN      = None                 # None -> robot_radius + 0.05
+DEEP_MARGIN      = 0                 # None -> robot_radius + 0.05
 # expert-unsafe = reverse-kNN boundary of the expert data (NUTS, Lindemann Alg. 1):
-NUTS_CELL         = 0.05                # grid-thin to ~uniform density before kNN (m); 0 disables
+NUTS_CELL         = 0.05               # grid-thin to ~uniform density before kNN (m); 0 disables
 NUTS_ETA          = 0.15               # neighbour radius (m) in (x, y)
-NUTS_BOUNDARY_PCT = 20                  # flag the sparsest X% of (thinned) expert states as boundary
+NUTS_BOUNDARY_PCT = 20                 # flag the sparsest X% of (thinned) expert states as boundary
 SEED             = 0
-REGEN            = False                # True -> regenerate trajectories, ignore cache
-TRAJ_BUDGET      = 600.0                # wall-clock budget for trajectory generation (s)
+REGEN            = False               # True -> regenerate trajectories, ignore cache
+TRAJ_BUDGET      = 600.0               # wall-clock budget for trajectory generation (s)
 # ==============================================================
 
 
@@ -107,8 +111,8 @@ def sample_safe(env, n: int, rng: np.random.Generator, deep_margin: float,
     return np.hstack([xy, theta])
 
 
-def nuts_boundary(expert: np.ndarray, eta: float, boundary_pct: float,
-                  cell: float = 0.05) -> np.ndarray:
+def nuts_boundary_mask(expert_all: np.ndarray, eta: float, boundary_pct: float,
+                       cell: float = 0.05) -> np.ndarray:
     """
     SAMPLING unsafe set X_N — the reverse-kNN boundary of the expert data
     (Lindemann et al. "Learning Hybrid CBFs", Appendix C.1, Algorithm 1 / NUTS).
@@ -122,18 +126,27 @@ def nuts_boundary(expert: np.ndarray, eta: float, boundary_pct: float,
     reflects how often the expert revisited a spot, so sparsely-visited
     interior corridors get flagged instead of the walls; after thinning the
     count reflects geometry (the ball is clipped only at the true data edge),
-    giving a clean wall-hugging shell. Returns the boundary expert rows.
+    giving a clean wall-hugging shell.
+
+    Returns a boolean mask over the rows of `expert_all` (True = boundary /
+    unsafe), so the caller can partition the expert set into disjoint safe and
+    unsafe parts. Points dropped by grid-thinning are never flagged (mask
+    False), i.e. they stay in the safe set.
     """
     from scipy.spatial import cKDTree
 
     if cell and cell > 0:
-        q = np.floor((expert[:, :2] - expert[:, :2].min(axis=0)) / cell).astype(np.int64)
-        _, keep = np.unique(q, axis=0, return_index=True)
-        sub = expert[keep]
+        q = np.floor((expert_all[:, :2] - expert_all[:, :2].min(axis=0)) / cell).astype(np.int64)
+        _, sub_idx = np.unique(q, axis=0, return_index=True)  # indices into expert_all
     else:
-        sub = expert
+        sub_idx = np.arange(len(expert_all))
+    sub = expert_all[sub_idx]
     counts = cKDTree(sub[:, :2]).query_ball_point(sub[:, :2], r=eta, return_length=True)
-    return sub[counts <= np.percentile(counts, boundary_pct)]
+    boundary_local = counts <= np.percentile(counts, boundary_pct)
+
+    mask = np.zeros(len(expert_all), dtype=bool)
+    mask[sub_idx[boundary_local]] = True
+    return mask
 
 
 # ── Trajectory caching ────────────────────────────────────────────────────
@@ -188,69 +201,65 @@ def main() -> None:
         results / f"{a.env}_sim.csv", a.n_safe_trajs, a.regen,
         lambda: generate_sim_set(env, kin, n_trajs=a.n_safe_trajs, seed=a.seed,
                                  deadline=time.monotonic() + a.budget))
-    expert = safe_df[["x", "y", "theta", "v", "omega"]].to_numpy()
+    expert_all = safe_df[["x", "y", "theta", "v", "omega"]].to_numpy()
 
-    # ── 2. expert_unsafe (X_N, sampling) = reverse-kNN boundary of expert data ──
-    expert_unsafe = nuts_boundary(expert, eta=a.eta, boundary_pct=a.boundary_pct, cell=a.cell)
+    # ── 2. split expert into disjoint safe / unsafe sets ──
+    # expert_unsafe (X_N, sampling) = reverse-kNN boundary of the expert data;
+    # expert_safe = the remaining collision-free states (boundary REMOVED, so a
+    # state is never labelled both safe and unsafe).
+    boundary = nuts_boundary_mask(expert_all, eta=a.eta, boundary_pct=a.boundary_pct, cell=a.cell)
+    expert_unsafe = expert_all[boundary]
+    expert_safe = expert_all[~boundary]
 
     # ── 3. sampled safe (deep)  &  4. sampled unsafe (fill S^c) ──
     safe = sample_safe(env, a.n_safe, rng, deep_margin)
     unsafe = sample_unsafe(env, a.n_unsafe, rng, inflate=r)
 
-    print(f"  expert_safe  {len(expert):>7}   expert_unsafe {len(expert_unsafe):>7} (NUTS boundary)")
+    print(f"  expert_safe  {len(expert_safe):>7}   expert_unsafe {len(expert_unsafe):>7} (NUTS boundary)")
     print(f"  safe(sample) {len(safe):>7}   unsafe(sample) {len(unsafe):>7} (fills S^c)")
 
     # ── write dataset ──
     cfg = dict(env=a.env, n_safe_trajs=a.n_safe_trajs, n_safe=a.n_safe, n_unsafe=a.n_unsafe,
                deep_margin=deep_margin, nuts_cell=a.cell, nuts_eta=a.eta,
                nuts_boundary_pct=a.boundary_pct, robot_radius=r, seed=a.seed)
-    tag = (f"{a.env}_es{len(expert)}_eu{len(expert_unsafe)}"
+    tag = (f"{a.env}_es{len(expert_safe)}_eu{len(expert_unsafe)}"
            f"_sa{len(safe)}_un{len(unsafe)}__"
            + hashlib.sha1(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:6])
     out = REPO_ROOT / "runs" / "datasets" / tag
     out.mkdir(parents=True, exist_ok=True)
 
-    pd.DataFrame(expert, columns=["x", "y", "theta", "v", "omega"]).to_csv(out / "expert_safe.csv", index=False)
+    pd.DataFrame(expert_safe, columns=["x", "y", "theta", "v", "omega"]).to_csv(out / "expert_safe.csv", index=False)
     pd.DataFrame(expert_unsafe, columns=["x", "y", "theta", "v", "omega"]).to_csv(out / "expert_unsafe.csv", index=False)
     pd.DataFrame(safe, columns=["x", "y", "theta"]).to_csv(out / "safe.csv", index=False)
     pd.DataFrame(unsafe, columns=["x", "y", "theta"]).to_csv(out / "unsafe.csv", index=False)
 
-    meta = dict(tag=tag, n_expert_safe=len(expert), n_expert_unsafe=len(expert_unsafe),
+    meta = dict(tag=tag, n_expert_safe=len(expert_safe), n_expert_unsafe=len(expert_unsafe),
                 n_safe=len(safe), n_unsafe=len(unsafe),
                 n_safe_trajectories=int(safe_df["traj_id"].nunique()))
     (out / "config.json").write_text(json.dumps(cfg, indent=2))
     (out / "meta.json").write_text(json.dumps(meta, indent=2))
 
-    _preview(env, safe_df, expert_unsafe, safe, unsafe, out, rng)
+    _preview(env, expert_safe, expert_unsafe, safe, unsafe, out, rng)
     print(f"[done] {out}")
 
 
-def _preview(env, safe_df, expert_unsafe, safe, unsafe, out, rng) -> None:
+def _preview(env, expert_safe, expert_unsafe, safe, unsafe, out, rng) -> None:
     """Four-set overlay — every set drawn as points (the data is points)."""
     try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        def sub(a, k):
-            return a[rng.choice(len(a), min(k, len(a)), replace=False)] if len(a) else a
-
-        fig, ax = plt.subplots(figsize=(9, 9))
-        plot_environment(ax, env, obstacle_color="0.8")   # light walls so points show
-        es = sub(safe_df[["x", "y"]].to_numpy(), 12000)   # safe expert states
-        uu, ss, un = sub(expert_unsafe, 6000), sub(safe, 4000), sub(unsafe, 8000)
-        # zorder above the obstacle patches so the S^c fill is visible
-        ax.scatter(un[:, 0], un[:, 1], s=2, c="tab:red", alpha=0.4, label="unsafe (sampled, S^c)", zorder=6)
-        ax.scatter(es[:, 0], es[:, 1], s=1, c="tab:blue", alpha=0.4, label="expert safe", zorder=7)
-        ax.scatter(ss[:, 0], ss[:, 1], s=2, c="tab:green", alpha=0.5, label="safe (sampled)", zorder=7)
-        if len(uu):
-            ax.scatter(uu[:, 0], uu[:, 1], s=4, c="tab:orange", alpha=0.8, label="expert unsafe (NUTS)", zorder=8)
-        ax.set_title(f"{env.name} dataset (4 sets)")
-        ax.legend(markerscale=3, loc="upper right", fontsize=8,
-                  framealpha=1.0, facecolor="white", edgecolor="0.5").set_zorder(10)
-        plt.tight_layout()
-        plt.savefig(out / "preview.png", dpi=110)
-        print(f"  saved {out / 'preview.png'}")
+        # zorder above the obstacle patches so the S^c fill stays visible
+        sets = [
+            {"xy": unsafe,       "label": "unsafe (sampled, S^c)", "color": "tab:red",
+             "s": 2, "alpha": 0.4, "zorder": 6, "subsample": 8000},
+            {"xy": expert_safe[:, :2], "label": "expert safe", "color": "tab:blue",
+             "s": 1, "alpha": 0.4, "zorder": 7, "subsample": 12000},
+            {"xy": safe,         "label": "safe (sampled)", "color": "tab:green",
+             "s": 2, "alpha": 0.5, "zorder": 7, "subsample": 4000},
+            {"xy": expert_unsafe, "label": "expert unsafe (NUTS)", "color": "tab:orange",
+             "s": 4, "alpha": 0.8, "zorder": 8, "subsample": 6000},
+        ]
+        path = preview_dataset(sets, out / "preview.png", env=env, rng=rng,
+                               title=f"{env.name} dataset (4 sets)")
+        print(f"  saved {path}")
     except Exception as e:
         print(f"  (preview skipped: {e})")
 

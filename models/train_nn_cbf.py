@@ -1,5 +1,6 @@
 from __future__ import annotations
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -9,15 +10,18 @@ from typing import Tuple, NamedTuple
 
 import jax
 import jax.numpy as jnp
-from jax import jit, vmap
+from jax import vmap
 from jax.flatten_util import ravel_pytree
 
 import equinox as eqx
 import optax
 import wandb
 
-sys.path.append(str(Path(__file__).resolve().parent.parent))
-import pipeline_io as pio  # noqa: E402
+# repo layout: models/ is the package dir; datasets + trained models live under runs/
+REPO_ROOT    = Path(__file__).resolve().parent.parent
+DATASETS_DIR = REPO_ROOT / "runs" / "datasets"
+MODELS_DIR   = REPO_ROOT / "runs" / "models"
+sys.path.append(str(REPO_ROOT))  # make `environments` importable when run as a script
 
 
 # --------------------------------------------------------------------------- #
@@ -43,20 +47,47 @@ class HParams(NamedTuple):
 
 
 class Data(NamedTuple):
-    x_constraint:    jnp.ndarray
+    x_constraint:    jnp.ndarray              # expert-safe states (Z_dyn)
     u_constraint:    jnp.ndarray
-    x_expert_unsafe: jnp.ndarray
-    x_safe:          jnp.ndarray
-    x_unsafe:        jnp.ndarray
+    x_expert_unsafe: jnp.ndarray              # NUTS-boundary expert states (X_N)
+    x_safe:          jnp.ndarray              # expert ∪ sampled deep-safe (used in loss)
+    x_unsafe:        jnp.ndarray              # sampled deep-unsafe (fills S^c)
     x_boundary:      jnp.ndarray = None
+    x_deep_safe:     jnp.ndarray = None       # sampled deep-safe only (plotting/eval)
 
 
 # --------------------------------------------------------------------------- #
-# Data loading  (mirrors optimization_cbf.py: three CSVs per dataset tag)
+# Data loading
+#
+# build_dataset.py writes FOUR CSVs per dataset tag under runs/datasets/<tag>/:
+#   expert_safe.csv    (x,y,theta,v,omega)  expert (x,u) pairs, Z_dyn / X_safe
+#   expert_unsafe.csv  (x,y,theta,v,omega)  NUTS-boundary expert states (X_N)
+#   safe.csv           (x,y,theta)          sampled deep-safe states
+#   unsafe.csv         (x,y,theta)          sampled unsafe states (fills S^c)
 # --------------------------------------------------------------------------- #
-def load_expert_safe(path: str) -> Tuple[np.ndarray, np.ndarray]:
+def resolve_dataset(tag: str) -> Path:
+    """Resolve a dataset tag to its directory under runs/datasets/.
+
+    Accepts an exact directory name or a unique prefix (e.g. "maze" or
+    "single_obstacle"), so callers don't have to paste the full hash suffix.
     """
-    Expert (x, u) pairs from the safe interior.
+    exact = DATASETS_DIR / tag
+    if exact.is_dir():
+        return exact
+    matches = sorted(p for p in DATASETS_DIR.glob(f"{tag}*") if p.is_dir())
+    if not matches:
+        avail = "\n  ".join(p.name for p in sorted(DATASETS_DIR.iterdir())
+                            if p.is_dir()) or "(none)"
+        raise SystemExit(f"no dataset matching '{tag}' under {DATASETS_DIR}\n"
+                         f"available:\n  {avail}")
+    if len(matches) > 1:
+        names = "\n  ".join(p.name for p in matches)
+        raise SystemExit(f"'{tag}' is ambiguous; matches:\n  {names}")
+    return matches[0]
+
+
+def load_expert(path: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Expert (x, u) pairs.
 
     Returns
     -------
@@ -118,9 +149,13 @@ def r_with_input(x, u, model):
 # --------------------------------------------------------------------------- #
 # Loss  (eq. 3.7)
 # --------------------------------------------------------------------------- #
-@jit
 def loss_with_input(model, data: Data, hp: HParams):
-    """Returns (total_loss, components_dict)."""
+    """Returns (total_loss, components_dict).
+
+    Not jit-decorated directly: ``model`` is an Equinox pytree with non-array
+    leaves (e.g. the activation fn), so it is jitted via ``eqx.filter_jit`` in
+    ``make_step``.
+    """
     relu = lambda z: jnp.maximum(z, 0.0)
     h = jax.vmap(model)    # model(x) takes a single x; vmap lifts to batch
 
@@ -188,21 +223,10 @@ def evaluate_2d(model, data: Data, hp: HParams,
     """
     Returns (metrics, fig):
       metrics  — test/* violation fractions on the safe/unsafe/expert sets
-      fig      — matplotlib 2D level-set figure of h(x) at `th_slice`
-    Reuses the rendering helpers from plot_iters.py.
+      fig      — matplotlib 2D level-set figure of h(x) at `th_slice`, rendered
+                 with the shared environments.dataset_plot helpers.
     """
-
-    #TODO instead import a function from the plotting class as this is reused. and keept the training code cleaner.
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import plot_iters as plot
-
     h = jax.vmap(model)
-    X_safe   = np.asarray(data.x_safe)
-    X_unsafe = np.asarray(data.x_unsafe)
-    X_expert = np.asarray(data.x_constraint)
-
     h_safe   = np.asarray(h(data.x_safe))
     h_unsafe = np.asarray(h(data.x_unsafe))
     r        = np.asarray(vmap(r_with_input, in_axes=(0, 0, None))(
@@ -217,22 +241,45 @@ def evaluate_2d(model, data: Data, hp: HParams,
         "test/min_r":       float(r.min()),
     }
 
-    XX, YY, pts, bounds = plot.workspace_grid(
-        [X_safe, X_unsafe, X_expert], th_slice, grid_n=grid_n)
-    h_grid = np.asarray(h(jnp.asarray(pts, dtype=jnp.float32))).reshape(XX.shape)
-    s = plot.near_theta(X_safe, th_slice)
-    u = plot.near_theta(X_unsafe, th_slice)
+    # Build the level-set figure with the shared plotting module: draw the h(x)
+    # field, then scatter the safe/unsafe samples near this theta slice on top.
+    import matplotlib
+    matplotlib.use("Agg")
+    from environments import dataset_plot as dplot
 
-    fig, ax = plt.subplots(figsize=(6, 5.5))
-    cf = plot.draw_h_field(ax, XX, YY, h_grid, s, u, bounds)
+    # Four explicit sets: expert-safe, expert-unsafe (NUTS), deep-safe (sampled),
+    # deep-unsafe (sampled S^c). x_deep_safe carries the sampled-safe states on
+    # their own; fall back to the combined safe set if it wasn't provided.
+    X_expert_safe   = np.asarray(data.x_constraint)
+    X_expert_unsafe = np.asarray(data.x_expert_unsafe)
+    X_deep_safe     = np.asarray(data.x_deep_safe if data.x_deep_safe is not None
+                                 else data.x_safe)
+    X_deep_unsafe   = np.asarray(data.x_unsafe)
+
+    XX, YY, pts, bounds = dplot.workspace_grid(
+        [X_expert_safe, X_expert_unsafe, X_deep_safe, X_deep_unsafe],
+        th_slice, grid_n=grid_n)
+    h_grid = np.asarray(h(jnp.asarray(pts, dtype=jnp.float32))).reshape(XX.shape)
+
+    fig, ax = dplot.new_workspace_ax(bounds=bounds, figsize=(6, 5.5))
+    cf = dplot.draw_h_field(ax, XX, YY, h_grid, bounds)
     fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04,
                  label="h(x)  (red<0, blue>0)")
+    dplot.scatter_sets(ax, [
+        {"xy": X_deep_unsafe[dplot.near_theta(X_deep_unsafe, th_slice)],
+         "label": "deep unsafe", "color": "tab:red", "s": 4, "alpha": 0.6, "zorder": 6},
+        {"xy": X_deep_safe[dplot.near_theta(X_deep_safe, th_slice)],
+         "label": "deep safe", "color": "tab:green", "s": 4, "alpha": 0.6, "zorder": 7},
+        {"xy": X_expert_safe[dplot.near_theta(X_expert_safe, th_slice)],
+         "label": "expert safe", "color": "tab:blue", "s": 4, "alpha": 0.6, "zorder": 8},
+        {"xy": X_expert_unsafe[dplot.near_theta(X_expert_unsafe, th_slice)],
+         "label": "expert unsafe", "color": "tab:orange", "s": 8, "alpha": 0.9, "zorder": 9},
+    ])
     ax.set_title(f"theta slice = {np.degrees(th_slice):.0f}°   "
                  f"safe {metrics['test/safe_pct']:.1f}% / "
                  f"unsafe {metrics['test/unsafe_pct']:.1f}% / "
                  f"dyn {metrics['test/dyn_pct']:.1f}% off-spec", fontsize=9)
-    ax.legend(loc="lower right", fontsize=7)
-    ax.set_xlabel("x"); ax.set_ylabel("y")
+    dplot.add_legend(ax)
     fig.tight_layout()
     return metrics, fig
 
@@ -280,7 +327,8 @@ def train(data: Data, hp: HParams = HParams(),
                     test_metrics, fig = evaluate_2d(
                         model, data, hp, th_slice=eval_theta_slice)
                     metrics.update(test_metrics)
-                    metrics["test/levelset"] = wandb.Image(fig)
+                    if fig is not None:
+                        metrics["test/levelset"] = wandb.Image(fig)
                 wandb.log(metrics, step=epoch)
                 if fig is not None:
                     import matplotlib.pyplot as plt
@@ -297,11 +345,26 @@ def train(data: Data, hp: HParams = HParams(),
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--dataset", required=True,
-                   help="stage-2 dataset tag (reads runs/datasets/<tag>/"
-                        "{expert_safe,unsafe,safe}.csv)")
+                   help="dataset tag or unique prefix; reads runs/datasets/<tag>/"
+                        "{expert_safe,expert_unsafe,safe,unsafe}.csv")
+
+    # optimisation
     p.add_argument("--num-epochs", type=int,   default=50_000)
     p.add_argument("--lr",         type=float, default=0.1)
     p.add_argument("--seed",       type=int,   default=5433)
+
+    # hyperparameters (HParams) — one flag each so sweeps can set any of them
+    defaults = HParams()
+    p.add_argument("--safe-value",     type=float, default=defaults.safe_value) 
+    p.add_argument("--unsafe-value",   type=float, default=defaults.unsafe_value)
+    p.add_argument("--gamma",          type=float, default=defaults.gamma)
+    p.add_argument("--lam-constraint", type=float, default=defaults.lam_constraint)
+    p.add_argument("--lam-boundary",   type=float, default=defaults.lam_boundary)
+    p.add_argument("--lam-safe",       type=float, default=defaults.lam_safe)
+    p.add_argument("--lam-unsafe",     type=float, default=defaults.lam_unsafe)
+    p.add_argument("--lam-param",      type=float, default=defaults.lam_param)
+
+    # logging / eval
     p.add_argument("--log-every",  type=int,   default=1000)
     p.add_argument("--eval-every", type=int,   default=10_000,
                    help="log a test/ step (2D level-set + violations) every N epochs")
@@ -311,13 +374,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb-run-name", default=None)
     p.add_argument("--wandb-mode",     default="online")
     p.add_argument("--no-wandb", action="store_true")
+
+    # output
+    p.add_argument("--out-dir", default=None,
+                   help="where to save model.eqx + meta.json "
+                        "(default: runs/models/<dataset-tag>/)")
     return p.parse_args()
 
 
 def save_model(out_dir: Path, model, meta: dict) -> None:
     """Serialise the trained Equinox MLP + a small meta sidecar."""
+    out_dir.mkdir(parents=True, exist_ok=True)
     eqx.tree_serialise_leaves(str(out_dir / "model.eqx"), model)
-    pio.save_meta(out_dir, meta)
+    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
 
 def load_model(model_path: str, key=None):
@@ -333,37 +402,48 @@ def load_model(model_path: str, key=None):
 def main():
     args = parse_args()
 
-    ds_dir = pio.resolve_existing(pio.STAGE_DATA, args.dataset)
+    ds_dir = resolve_dataset(args.dataset)
+    tag    = ds_dir.name
 
-    # X_N: X_sampled_unsafe U X_sampled_unsafe. These are sampled from the continous set N which is sigma offset of the continous set D. D is the defined as the union of n-dimentional balls of radius ε centered at the expert trajectories. The sampled states are labeled as safe/unsafe by checking whether they are inside/outside the union of n-dimentional balls. The expert trajectories are also labeled as safe/unsafe by checking whether they are inside/outside the union of n-dimentional balls centered at each state in the expert trajectories. This bridges the X_safe samples and continous space.
-    # X_safe: X_expert_safe U X_sampled_safe. X_safe_bar is the set of deep safe states.
+    # The dataset is four CSVs (see load_expert / load_states_only above):
+    #   x_constraint : expert safe (x,u) pairs — Z_dyn for the descent term;
+    #                  the states also seed the safe set.
+    #   x_safe       : x_constraint states ∪ sampled deep-safe states.
+    #   x_unsafe     : sampled unsafe states (fills S^c).
+    #   x_expert_unsafe : NUTS-boundary expert states (X_N).
+    print(f"[stage 3/nn] dataset = {tag}")
+    X_expert_safe, U_expert_safe = load_expert(str(ds_dir / "expert_safe.csv"))
+    X_expert_unsafe              = load_states_only(str(ds_dir / "expert_unsafe.csv"))
+    X_sampled_safe               = load_states_only(str(ds_dir / "safe.csv"))
+    X_sampled_unsafe             = load_states_only(str(ds_dir / "unsafe.csv"))
 
-    #Load from one file instead.
-    print(f"[stage 3/nn] parent dataset = {args.dataset}")
-    X_expert_safe, _ = load_expert_safe(str(ds_dir / "expert_safe.csv"))  # discrete Z_dyn: expert (x,u)
-    X_expert_unsafe, _ = load_expert_safe(str(ds_dir / "expert_safe.csv"))  # discrete Z_dyn: expert (x,u)
-    X_sampled_safe               = load_states_only(str(ds_dir / "safe.csv")) # X_N:   ε̄-net of N
-    X_sampled_unsafe             = load_states_only(str(ds_dir / "unsafe.csv")) 
-    
+    print(f"  expert_safe   X={X_expert_safe.shape}  U={U_expert_safe.shape}")
+    print(f"  expert_unsafe X={X_expert_unsafe.shape}")
+    print(f"  safe          X={X_sampled_safe.shape}")
+    print(f"  unsafe        X={X_sampled_unsafe.shape}")
 
-    print(f"  Union of expert trajectories X={X_expert_safe.shape}")
-    print(f"  unsafe      X={X_sampled_safe.shape}")
-    print(f"  safe        X={X_sampled_unsafe.shape}")
-
-    #Combining safe sampled states and expert trajectories to get the full safe set.
     X_safe = np.concatenate([X_expert_safe, X_sampled_safe], axis=0)
-    X_unsafe = X_sampled_unsafe
-
 
     data = Data(
-        x_constraint    = jnp.asarray(X_expert_safe),    # state - trajectory (expert safe)
-        x_safe          = jnp.asarray(X_safe),   # states - sampled from safe interior
-        x_unsafe        = jnp.asarray(X_unsafe), # states - sampled from unsafe exterior
-        x_expert_unsafe = jnp.asarray(X_expert_unsafe), # expert unsafe states
+        x_constraint    = jnp.asarray(X_expert_safe),     # expert states (Z_dyn)
+        u_constraint    = jnp.asarray(U_expert_safe),     # expert controls (Z_dyn)
+        x_safe          = jnp.asarray(X_safe),            # expert ∪ sampled deep-safe
+        x_unsafe        = jnp.asarray(X_sampled_unsafe),  # sampled unsafe
+        x_expert_unsafe = jnp.asarray(X_expert_unsafe),   # NUTS-boundary expert states
         x_boundary      = None,
+        x_deep_safe     = jnp.asarray(X_sampled_safe),    # sampled deep-safe only (eval)
     )
 
-    hp = HParams()
+    hp = HParams(
+        safe_value     = args.safe_value,
+        unsafe_value   = args.unsafe_value,
+        gamma          = args.gamma,
+        lam_constraint = args.lam_constraint,
+        lam_boundary   = args.lam_boundary,
+        lam_safe       = args.lam_safe,
+        lam_unsafe     = args.lam_unsafe,
+        lam_param      = args.lam_param,
+    )
     model = train(data, hp=hp, num_epochs=args.num_epochs, lr=args.lr,
                   seed=args.seed, log_every=args.log_every,
                   eval_every=args.eval_every,
@@ -372,7 +452,18 @@ def main():
                   wandb_project=args.wandb_project,
                   wandb_run_name=args.wandb_run_name, wandb_mode=args.wandb_mode)
 
-    #TODO save the model and meta (dataset tag + hp dict)
+    out_dir = Path(args.out_dir) if args.out_dir else MODELS_DIR / tag
+    meta = {
+        "dataset": tag,
+        "hparams": hp._asdict(),
+        "num_epochs": args.num_epochs, "lr": args.lr, "seed": args.seed,
+        "n_hidden": N_HIDDEN, "n_hidden_layers": N_HIDDEN_LAYERS,
+        "n_safe": int(X_safe.shape[0]),
+        "n_unsafe": int(X_sampled_unsafe.shape[0]),
+        "n_expert": int(X_expert_safe.shape[0]),
+    }
+    save_model(out_dir, model, meta)
+    print(f"[done] saved model + meta to {out_dir}")
 
 
 if __name__ == "__main__":

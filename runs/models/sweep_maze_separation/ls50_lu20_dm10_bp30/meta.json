@@ -1,0 +1,23 @@
+{
+  "dataset": "maze_es250981_eu2638_sa60000_un150000__a40729",
+  "trainer": "minibatch",
+  "batch_size": 4096,
+  "hparams": {
+    "safe_value": 1.5,
+    "unsafe_value": 0.5,
+    "gamma": 0.05,
+    "lam_constraint": 15.0,
+    "lam_boundary": 1.0,
+    "lam_safe": 50.0,
+    "lam_unsafe": 20.0,
+    "lam_param": 0.1
+  },
+  "num_epochs": 50000,
+  "lr": 0.1,
+  "seed": 5433,
+  "n_hidden": 64,
+  "n_hidden_layers": 2,
+  "n_safe": 310981,
+  "n_unsafe": 150000,
+  "n_expert": 250981
+}
