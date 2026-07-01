@@ -16,4 +16,7 @@ dependencies = [
     "scipy>=1.15.3",
     "torch>=2.12.0",
     "wandb>=0.27.0",
+    "osqp>=1.0.4",
+    "pygame>=2.5.2",
+    "cvxpy>=1.4.3",
 ]
